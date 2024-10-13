@@ -1,0 +1,6 @@
+log:
+  level: debug
+
+port: 53
+
+token: secret

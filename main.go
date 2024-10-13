@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log/slog"
@@ -13,12 +14,7 @@ import (
 	"time"
 
 	forward "github.com/lrascao/udp-forward"
-)
-
-const (
-	defaultTargetName string = "router2-node1"
-	defaultTargetIP   string = "161.230.190.68"
-	defaultTargetPort int    = 5321
+	"github.com/spf13/viper"
 )
 
 type destination struct {
@@ -26,26 +22,52 @@ type destination struct {
 	Addr string `json:"addr"`
 }
 
+type config struct {
+	Log struct {
+		Level string `yaml:"level"`
+	} `yaml:"log"`
+	Port  int    `yaml:"port"`
+	Token string `yaml:"token"`
+}
+
 func main() {
 	ctx := context.Background()
 
+	// read config argument from command line
+	var configFile string
+	flag.StringVar(&configFile, "config", "config.yaml", "config file")
+	flag.Parse()
+
+	// read config file using viper
+	viper.SetConfigFile(configFile)
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(".")
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			panic(err)
+		}
+	}
+
+	// unmarshal config file into config struct
+	var cfg config
+	if err := viper.Unmarshal(&cfg); err != nil {
+		panic(err)
+	}
+
 	logHandler := slog.NewTextHandler(os.Stdout,
 		&slog.HandlerOptions{
-			Level:     slog.LevelDebug,
+			Level:     toLevelDebug(cfg.Log.Level),
 			AddSource: true,
 		})
 	log := slog.New(logHandler)
 	slog.SetDefault(log)
 
 	updateDstCh := make(chan []destination)
-	serveHTTP(ctx, updateDstCh)
+	serveHTTP(ctx, cfg, updateDstCh)
 
-	src := fmt.Sprintf("%s:%d", "0.0.0.0", 53)
-
-	dst := fmt.Sprintf("%s:%d", defaultTargetIP, defaultTargetPort)
+	src := fmt.Sprintf(":%d", cfg.Port)
 
 	forwarder, err := forward.NewForwarder(src,
-		forward.WithDestination(defaultTargetName, dst),
 		forward.WithTimeout(30*time.Second),
 		forward.WithConnectCallback(func(addr string) {
 			slog.Debug("connected", "from", addr)
@@ -83,10 +105,15 @@ func main() {
 	}
 }
 
-func serveHTTP(ctx context.Context, ch chan []destination) {
+func serveHTTP(ctx context.Context, cfg config, ch chan []destination) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/",
 		func(w http.ResponseWriter, r *http.Request) {
+			// authorize request
+			if secret := r.Header.Get("Authorization"); secret != cfg.Token {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
 			// read the whole body into a string
 			body, err := ioutil.ReadAll(r.Body)
 			if err != nil {
@@ -120,4 +147,19 @@ func serveHTTP(ctx context.Context, ch chan []destination) {
 		}
 	}()
 
+}
+
+func toLevelDebug(lvl string) slog.Level {
+	switch lvl {
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
