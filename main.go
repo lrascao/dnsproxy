@@ -26,8 +26,13 @@ type config struct {
 	Log struct {
 		Level string `yaml:"level"`
 	} `yaml:"log"`
-	Port  int    `yaml:"port"`
-	Token string `yaml:"token"`
+	Forward struct {
+		Port int `yaml:"port"`
+	} `yaml:"forward"`
+	Admin struct {
+		Port  int    `yaml:"port"`
+		Token string `yaml:"token"`
+	} `yaml:"admin"`
 }
 
 func main() {
@@ -65,7 +70,7 @@ func main() {
 	updateDstCh := make(chan []destination)
 	serveHTTP(ctx, cfg, updateDstCh)
 
-	src := fmt.Sprintf(":%d", cfg.Port)
+	src := fmt.Sprintf(":%d", cfg.Forward.Port)
 
 	forwarder, err := forward.NewForwarder(src,
 		forward.WithTimeout(30*time.Second),
@@ -99,7 +104,7 @@ func main() {
 			if err := forwarder.Update(opts...); err != nil {
 				log.Error("Error updating forwarder", "error", err)
 			}
-			fmt.Printf("forwarding UDP on %s to %v\n",
+			fmt.Printf("update: forwarding UDP on %s to %v\n",
 				src, forwarder.Destinations())
 		}
 	}
@@ -110,7 +115,7 @@ func serveHTTP(ctx context.Context, cfg config, ch chan []destination) {
 	mux.HandleFunc("/",
 		func(w http.ResponseWriter, r *http.Request) {
 			// authorize request
-			if secret := r.Header.Get("Authorization"); secret != cfg.Token {
+			if secret := r.Header.Get("Authorization"); secret != cfg.Admin.Token {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -131,13 +136,14 @@ func serveHTTP(ctx context.Context, cfg config, ch chan []destination) {
 
 	// create an http server
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", 5353),
+		Addr:    fmt.Sprintf(":%d", cfg.Admin.Port),
 		Handler: mux,
 		BaseContext: func(l net.Listener) context.Context {
 			return ctx
 		},
 	}
 
+	fmt.Printf("admin HTTP running on :%d\n", cfg.Admin.Port)
 	go func() {
 		err := srv.ListenAndServe()
 		if errors.Is(err, http.ErrServerClosed) {

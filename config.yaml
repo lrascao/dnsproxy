@@ -1,6 +1,9 @@
 log:
   level: debug
 
-port: 53
+forward:
+  port: 53
 
-token: secret
+admin:
+  port: 5353
+  token: secret
