@@ -3,7 +3,7 @@ module github.com/lrascao/dnsproxy
 go 1.22.5
 
 require (
-	github.com/lrascao/udp-forward v0.0.0-20241013212308-9d92db743767
+	github.com/lrascao/udp-forward v0.0.0-20241029191433-a7a4a2831a38
 	github.com/spf13/viper v1.19.0
 )
 
