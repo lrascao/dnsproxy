@@ -14,12 +14,13 @@ import (
 	"time"
 
 	forward "github.com/lrascao/udp-forward"
+	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
 
 type destination struct {
-	Name string `json:"name"`
-	Addr string `json:"addr"`
+	Name    string `json:"name"`
+	Address string `json:"addr"`
 }
 
 type config struct {
@@ -37,6 +38,15 @@ type config struct {
 		Port  int    `yaml:"port"`
 		Token string `yaml:"token"`
 	} `yaml:"admin"`
+	HealthCheck struct {
+		Period time.Duration `yaml:"period"`
+		Domain string        `yaml:"domain"`
+	} `yaml:"healthCheck"`
+}
+
+type runner struct {
+	cfg          config
+	destinations []destination
 }
 
 func main() {
@@ -71,10 +81,22 @@ func main() {
 	log := slog.New(logHandler)
 	slog.SetDefault(log)
 
-	updateDstCh := make(chan []destination)
-	serveHTTP(ctx, cfg, updateDstCh)
+	slog.Debug("config", "config", cfg)
 
-	src := fmt.Sprintf(":%d", cfg.Forward.Port)
+	runner := &runner{
+		cfg: cfg,
+	}
+	if err := runner.Run(ctx); err != nil {
+		slog.Error("error running runner", "error", err)
+		os.Exit(1)
+	}
+}
+
+func (r *runner) Run(ctx context.Context) error {
+	updateDstCh := make(chan []destination)
+	if r.cfg.Admin.Port != 0 {
+		r.serveHTTP(ctx, updateDstCh)
+	}
 
 	opts := []forward.Option{
 		forward.WithTimeout(30 * time.Second),
@@ -86,16 +108,30 @@ func main() {
 		}),
 	}
 
-	if len(cfg.Forward.Static) != 0 {
-		for _, static := range cfg.Forward.Static {
+	if len(r.cfg.Forward.Static) != 0 {
+		for _, static := range r.cfg.Forward.Static {
 			if static.Name == "" || static.Address == "" {
 				slog.Warn("skipping static destination with empty name or address",
 					"name", static.Name, "addr", static.Address)
 				continue
 			}
-			opts = append(opts, forward.WithDestination(static.Name, static.Address))
+			r.destinations = append(r.destinations,
+				destination{
+					Name:    static.Name,
+					Address: static.Address,
+				})
 		}
 	}
+
+	for _, dst := range r.destinations {
+		opts = append(opts,
+			forward.WithDestination(
+				dst.Name,
+				dst.Address,
+			))
+	}
+
+	src := fmt.Sprintf(":%d", r.cfg.Forward.Port)
 
 	forwarder, err := forward.NewForwarder(src, opts...)
 	if err != nil {
@@ -109,6 +145,15 @@ func main() {
 		forwarder.Start(ctx)
 	}()
 
+	if r.cfg.HealthCheck.Period > 0 {
+		go func() {
+			fmt.Printf("starting health check every %s on domain %s\n",
+				r.cfg.HealthCheck.Period, r.cfg.HealthCheck.Domain)
+
+			r.healthCheck(ctx, forwarder)
+		}()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -116,10 +161,14 @@ func main() {
 			fmt.Printf("New target destinations: %v\n", destinations)
 			var opts []forward.Option
 			for _, dst := range destinations {
-				opts = append(opts, forward.WithDestination(dst.Name, dst.Addr))
+				opts = append(opts,
+					forward.WithDestination(
+						dst.Name,
+						dst.Address),
+				)
 			}
 			if err := forwarder.Update(opts...); err != nil {
-				log.Error("Error updating forwarder", "error", err)
+				slog.Error("Error updating forwarder", "error", err)
 			}
 			fmt.Printf("update: forwarding UDP on %s to %v\n",
 				src, forwarder.Destinations())
@@ -127,17 +176,17 @@ func main() {
 	}
 }
 
-func serveHTTP(ctx context.Context, cfg config, ch chan []destination) {
+func (r *runner) serveHTTP(ctx context.Context, ch chan []destination) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/",
-		func(w http.ResponseWriter, r *http.Request) {
+		func(w http.ResponseWriter, req *http.Request) {
 			// authorize request
-			if secret := r.Header.Get("Authorization"); secret != cfg.Admin.Token {
+			if secret := req.Header.Get("Authorization"); secret != r.cfg.Admin.Token {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
 			// read the whole body into a string
-			body, err := ioutil.ReadAll(r.Body)
+			body, err := ioutil.ReadAll(req.Body)
 			if err != nil {
 				http.Error(w, "error reading body", http.StatusInternalServerError)
 				return
@@ -153,14 +202,14 @@ func serveHTTP(ctx context.Context, cfg config, ch chan []destination) {
 
 	// create an http server
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Admin.Port),
+		Addr:    fmt.Sprintf(":%d", r.cfg.Admin.Port),
 		Handler: mux,
 		BaseContext: func(l net.Listener) context.Context {
 			return ctx
 		},
 	}
 
-	fmt.Printf("admin HTTP running on :%d\n", cfg.Admin.Port)
+	fmt.Printf("admin HTTP running on :%d\n", r.cfg.Admin.Port)
 	go func() {
 		err := srv.ListenAndServe()
 		if errors.Is(err, http.ErrServerClosed) {
@@ -169,7 +218,70 @@ func serveHTTP(ctx context.Context, cfg config, ch chan []destination) {
 			fmt.Printf("error listening server: %v\n", err)
 		}
 	}()
+}
 
+func (r *runner) healthCheck(ctx context.Context, f forward.Forwarder) {
+	ticker := time.NewTicker(r.cfg.HealthCheck.Period)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			var healthy []destination
+			for _, d := range r.destinations {
+				if err := r.checkDNS(ctx, d); err != nil {
+					slog.Error(fmt.Sprintf("udp-forward: DNS %s health check failed: %v",
+						d.Address, err))
+				} else {
+					healthy = append(healthy, d)
+				}
+			}
+
+			var opts []forward.Option
+			for _, d := range healthy {
+				opts = append(opts,
+					forward.WithDestination(
+						d.Name,
+						d.Address),
+				)
+			}
+			if err := f.Update(opts...); err != nil {
+				slog.Error("Error updating forwarder with healthy destinations", "error", err)
+			} else {
+				slog.Info("Health check completed", "healthy", healthy)
+			}
+		}
+	}
+}
+
+func (r *runner) checkDNS(ctx context.Context, d destination) error {
+	slog.Debug(fmt.Sprintf("checking DNS %s", d.Address))
+
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(15*time.Second))
+	defer cancel()
+
+	// perform a DNS lookup google.com to this specific server to check if
+	// it is healthy
+
+	// Create a new DNS message
+	m := new(dns.Msg)
+	m.SetQuestion(r.cfg.HealthCheck.Domain, dns.TypeA)
+
+	// Create a DNS client
+	client := new(dns.Client)
+	// Send the query
+	reply, _, err := client.Exchange(m, d.Address)
+	if err != nil {
+		return fmt.Errorf("error querying DNS %s: %w", d.Address, err)
+	}
+	// Check for response
+	if len(reply.Answer) == 0 {
+		return fmt.Errorf("no answer received from DNS %s", d.Address)
+	}
+
+	return nil
 }
 
 func toLevelDebug(lvl string) slog.Level {
