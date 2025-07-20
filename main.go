@@ -27,7 +27,11 @@ type config struct {
 		Level string `yaml:"level"`
 	} `yaml:"log"`
 	Forward struct {
-		Port int `yaml:"port"`
+		Port   int `yaml:"port"`
+		Static []struct {
+			Name    string `yaml:"name"`
+			Address string `yaml:"address"`
+		} `yaml:"static,omitempty"`
 	} `yaml:"forward"`
 	Admin struct {
 		Port  int    `yaml:"port"`
@@ -72,15 +76,28 @@ func main() {
 
 	src := fmt.Sprintf(":%d", cfg.Forward.Port)
 
-	forwarder, err := forward.NewForwarder(src,
-		forward.WithTimeout(30*time.Second),
+	opts := []forward.Option{
+		forward.WithTimeout(30 * time.Second),
 		forward.WithConnectCallback(func(addr string) {
 			slog.Debug("connected", "from", addr)
 		}),
 		forward.WithDisconnectCallback(func(addr string) {
 			slog.Debug("disconnected", "from", addr)
 		}),
-	)
+	}
+
+	if len(cfg.Forward.Static) != 0 {
+		for _, static := range cfg.Forward.Static {
+			if static.Name == "" || static.Address == "" {
+				slog.Warn("skipping static destination with empty name or address",
+					"name", static.Name, "addr", static.Address)
+				continue
+			}
+			opts = append(opts, forward.WithDestination(static.Name, static.Address))
+		}
+	}
+
+	forwarder, err := forward.NewForwarder(src, opts...)
 	if err != nil {
 		panic(err)
 	}
