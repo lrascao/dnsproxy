@@ -28,7 +28,8 @@ type config struct {
 		Level string `yaml:"level"`
 	} `yaml:"log"`
 	Forward struct {
-		Port   int `yaml:"port"`
+		Address string `yaml:"address"`
+		Port    int    `yaml:"port"`
 		Static []struct {
 			Name    string `yaml:"name"`
 			Address string `yaml:"address"`
@@ -131,7 +132,7 @@ func (r *runner) Run(ctx context.Context) error {
 			))
 	}
 
-	src := fmt.Sprintf(":%d", r.cfg.Forward.Port)
+	src := fmt.Sprintf("%s:%d", r.cfg.Forward.Address, r.cfg.Forward.Port)
 
 	forwarder, err := forward.NewForwarder(src, opts...)
 	if err != nil {

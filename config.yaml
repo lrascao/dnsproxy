@@ -2,8 +2,12 @@ log:
   level: debug
 
 forward:
+  address: "fly-global-services"
   port: 53
 
 admin:
   port: 5353
   token: secret
+# healthCheck:
+#   period: 10s
+#   domain: google.com.

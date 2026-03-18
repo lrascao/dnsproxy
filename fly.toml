@@ -1,0 +1,27 @@
+app = "dnsproxy-y4wvcg"
+primary_region = "lhr"
+
+[build.args]
+GO_VERSION = "1.24.4"
+
+[env]
+PORT = "5353"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 5353
+
+  [[services.ports]]
+    port = 5353
+
+[[vm]]
+cpu_kind = "shared"
+cpus = 1
+memory_mb = 256
+
+[[services]]
+  protocol = "udp"
+  internal_port = 53
+
+  [[services.ports]]
+    port = 53
